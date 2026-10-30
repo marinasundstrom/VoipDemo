@@ -127,19 +127,40 @@ public sealed class AsteriskEventService(
     }
 
     private async Task HandleEventAsync(
-        JsonElement root,
-        CancellationToken cancellationToken)
+     JsonElement root,
+     CancellationToken cancellationToken)
     {
         if (!root.TryGetProperty("type", out var type))
             return;
 
-        if (type.GetString() != "StasisStart")
-            return;
+        switch (type.GetString())
+        {
+            case "StasisStart":
+                await HandleCallStartedAsync(root, cancellationToken);
+                break;
 
-        if (!root.TryGetProperty("channel", out var channel))
-            return;
+            case "ChannelDtmfReceived":
+                HandleDtmfReceived(root);
+                break;
 
-        var channelId = channel.GetProperty("id").GetString();
+            case "PlaybackFinished":
+                logger.LogInformation("Playback finished");
+                break;
+
+            case "StasisEnd":
+                logger.LogInformation("Call left Stasis");
+                break;
+        }
+    }
+
+    private async Task HandleCallStartedAsync(
+    JsonElement root,
+    CancellationToken cancellationToken)
+    {
+        var channelId = root
+            .GetProperty("channel")
+            .GetProperty("id")
+            .GetString();
 
         if (string.IsNullOrEmpty(channelId))
             return;
@@ -150,8 +171,6 @@ public sealed class AsteriskEventService(
 
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(3));
-
             await asterisk.AnswerAsync(
                 channelId,
                 cancellationToken);
@@ -163,9 +182,27 @@ public sealed class AsteriskEventService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex,
+            logger.LogError(
+                ex,
                 "Failed to handle call {ChannelId}",
                 channelId);
         }
+    }
+
+    private void HandleDtmfReceived(JsonElement root)
+    {
+        var channelId = root
+            .GetProperty("channel")
+            .GetProperty("id")
+            .GetString();
+
+        var digit = root
+            .GetProperty("digit")
+            .GetString();
+
+        logger.LogInformation(
+            "Caller pressed {Digit} on channel {ChannelId}",
+            digit,
+            channelId);
     }
 }
