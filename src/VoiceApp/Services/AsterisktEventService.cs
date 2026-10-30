@@ -76,18 +76,6 @@ public sealed class AsteriskEventService(
             uri.Host,
             uri.Port);
 
-        logger.LogInformation(
-            "Scheme is: {Scheme}",
-            uri.Scheme);
-
-        logger.LogInformation(
-            "Path is: {Path}",
-            uri.Path);
-
-        logger.LogInformation(
-            "Query is: {Query}",
-            uri.Query);
-
         await socket.ConnectAsync(uri.Uri, cancellationToken);
 
         logger.LogInformation("Connected to Asterisk ARI");
