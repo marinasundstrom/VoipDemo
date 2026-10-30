@@ -1,0 +1,11 @@
+@VoiceApp_HostAddress = http://localhost:5144
+
+GET {{VoiceApp_HostAddress}}/openapi/v1.json
+Accept: application/json
+
+###
+
+GET {{VoiceApp_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

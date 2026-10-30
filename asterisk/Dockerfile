@@ -1,0 +1,1 @@
+FROM andrius/asterisk:22-cert
