@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,9 @@ public sealed class AsteriskEventService(
     ILogger<AsteriskEventService> logger)
     : BackgroundService
 {
+    private readonly ConcurrentDictionary<string, string>
+    recordings = new();
+    
     protected override async Task ExecuteAsync(
         CancellationToken stoppingToken)
     {
@@ -139,6 +143,16 @@ public sealed class AsteriskEventService(
                 await HandleCallStartedAsync(root, cancellationToken);
                 break;
 
+            case "RecordingFinished":
+                logger.LogInformation(
+                    "Recording finished: {Event}",
+                    root.GetRawText());
+
+                await HandleRecordingFinishedAsync(
+                    root,
+                    cancellationToken);
+                break;
+
             case "ChannelDtmfReceived":
                 HandleDtmfReceived(root);
                 break;
@@ -148,8 +162,35 @@ public sealed class AsteriskEventService(
                 break;
 
             case "StasisEnd":
-                logger.LogInformation("Call left Stasis");
-                break;
+                {
+                    var channelId = root
+                        .GetProperty("channel")
+                        .GetProperty("id")
+                        .GetString();
+
+                    logger.LogInformation(
+                        "Channel {ChannelId} left Stasis",
+                        channelId);
+
+                    break;
+                }
+
+            case "ChannelDestroyed":
+                {
+                    var channelId = root
+                        .GetProperty("channel")
+                        .GetProperty("id")
+                        .GetString();
+
+                    logger.LogInformation(
+                        "Channel {ChannelId} destroyed: {Cause}",
+                        channelId,
+                        root.TryGetProperty("cause_txt", out var cause)
+                            ? cause.GetString()
+                            : "Unknown");
+
+                    break;
+                }
         }
     }
 
@@ -186,6 +227,29 @@ public sealed class AsteriskEventService(
                 ex,
                 "Failed to handle call {ChannelId}",
                 channelId);
+
+            return;
+        }
+
+        var recordingName = $"echo-{Guid.NewGuid():N}";
+
+        recordings[channelId] = recordingName;
+
+        try
+        {
+            await asterisk.StartRecordingAsync(
+                channelId,
+                recordingName,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            recordings.TryRemove(channelId, out _);
+
+            logger.LogError(
+                ex,
+                "Failed to start recording for {ChannelId}",
+                channelId);
         }
     }
 
@@ -204,5 +268,35 @@ public sealed class AsteriskEventService(
             "Caller pressed {Digit} on channel {ChannelId}",
             digit,
             channelId);
+    }
+
+    private async Task HandleRecordingFinishedAsync(
+    JsonElement root,
+    CancellationToken cancellationToken)
+    {
+        var recording = root.GetProperty("recording");
+        var recordingName = recording.GetProperty("name").GetString();
+
+        if (recordingName is null)
+            return;
+
+        foreach (var (channelId, name) in recordings)
+        {
+            if (name != recordingName)
+                continue;
+
+            recordings.TryRemove(channelId, out _);
+
+            logger.LogInformation(
+                "Playing recording {RecordingName}",
+                recordingName);
+
+            await asterisk.PlayRecordingAsync(
+                channelId,
+                recordingName,
+                cancellationToken);
+
+            break;
+        }
     }
 }

@@ -38,4 +38,41 @@ public sealed class AsteriskClient(HttpClient http)
 
         response.EnsureSuccessStatusCode();
     }
+
+    public async Task StartRecordingAsync(
+    string channelId,
+    string recordingName,
+    CancellationToken cancellationToken = default)
+    {
+        var url =
+            $"channels/{Uri.EscapeDataString(channelId)}/record" +
+            $"?name={Uri.EscapeDataString(recordingName)}" +
+            "&format=wav" +
+            "&maxDurationSeconds=5" +
+            "&ifExists=overwrite" +
+            "&beep=false";
+
+        using var response = await http.PostAsync(
+            url,
+            null,
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task PlayRecordingAsync(
+        string channelId,
+        string recordingName,
+        CancellationToken cancellationToken = default)
+    {
+        var media = $"recording:{recordingName}";
+
+        using var response = await http.PostAsync(
+            $"channels/{Uri.EscapeDataString(channelId)}/play" +
+            $"?media={Uri.EscapeDataString(media)}",
+            null,
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
 }
