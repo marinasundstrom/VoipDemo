@@ -198,17 +198,26 @@ public sealed class AsteriskEventService(
     JsonElement root,
     CancellationToken cancellationToken)
     {
-        var channelId = root
-            .GetProperty("channel")
-            .GetProperty("id")
-            .GetString();
+        var channel = root.GetProperty("channel");
+
+        var channelId = channel.GetProperty("id").GetString();
 
         if (string.IsNullOrEmpty(channelId))
             return;
 
+        var channelName = channel.GetProperty("name").GetString();
+
+        var caller = channel.GetProperty("caller");
+
+        var callerNumber = caller.GetProperty("number").GetString();
+        var callerName = caller.GetProperty("name").GetString();
+
         logger.LogInformation(
-            "Incoming call on channel {ChannelId}",
-            channelId);
+            "Incoming call: ChannelId={ChannelId}, Caller={Caller}",
+            channelId,
+            callerNumber);
+
+        // ...
 
         try
         {
