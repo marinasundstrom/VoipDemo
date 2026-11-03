@@ -6,6 +6,7 @@ public sealed class CallSession : IAsyncDisposable
     private readonly object sync = new();
     private bool disposed;
 
+    public CallInput Input { get; } = new();
     public required string Id { get; init; }
     public required string ChannelId { get; init; }
     public string? BridgeId { get; set; }

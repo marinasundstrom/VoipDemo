@@ -1,8 +1,8 @@
 # VoipDemo
 
-A VoIP proof of concept using Asterisk, ASP.NET Core, and a SIP softphone such as Linphone. Dial **500** to hear an announcement, hear a beep, speak for five seconds, and hear your recording played back through an Asterisk media WebSocket.
+A VoIP proof of concept using Asterisk, ASP.NET Core, and a SIP softphone such as Linphone. Dial **500** to explore recorded audio, live text-to-speech, keypad input, and recording/playback through an Asterisk media WebSocket.
 
-VoiceApp can run **locally on macOS** while Asterisk runs in Docker, or both can run in Docker. Speech is generated on the Mac using `say`, converted to raw PCM with FFmpeg, and read by VoiceApp. Without an audio file configured, the app sends a one-second 440 Hz test tone.
+VoiceApp can run **locally on macOS** while Asterisk runs in Docker, or both can run in Docker. The local development profile runs an interactive menu with speech synthesized during the call using macOS `say` and FFmpeg. Docker defaults to the original Echo scenario using a prepared PCM announcement (or a test tone).
 
 ## How it works
 
@@ -24,7 +24,7 @@ For each incoming call, VoiceApp answers, creates a mixing bridge, adds the call
 
 Call tasks run independently of the ARI event receive loop. Explicit media channel IDs and the `WebSocket/` name filter prevent recursive call setup. Caller hangup, setup failure, application shutdown, or ARI disconnection triggers cleanup of the media socket, external channel, bridge, and caller channel. A media channel leaving Stasis alone does not end the caller session. A lost ARI connection ends active calls because their state can no longer be tracked reliably.
 
-After the announcement, VoiceApp plays a 200 ms beep, captures five seconds of incoming PCM in memory, and streams that recording back once. Audio received before the recording window is discarded; the call stays open after playback. Nothing is saved to disk. There is no speech recognition or AI integration yet.
+In the Echo scenario, or menu option 5, VoiceApp plays a 200 ms beep, captures five seconds of incoming PCM in memory, and streams that recording back once. Audio received before the recording window is discarded; the call stays open after playback. Nothing is saved to disk. There is no speech recognition or AI integration yet.
 
 ## Prerequisites
 
@@ -50,7 +50,47 @@ The SIP credentials for extension **1001** are separate and live in `asterisk/pj
 
 The dialplan in `asterisk/extensions.conf` routes extension 500 to `Stasis(voiceapp)`. VoiceApp answers through ARI; the dialplan does not answer first.
 
-## Generate speech on macOS
+## Interactive scenarios (local macOS mode)
+
+Development settings select `Demo:Scenario=Menu`. Use Linphone's keypad during a call:
+
+| Key | Scenario |
+| --- | --- |
+| `1` | Play an 8-second recorded music sample (or your configured PCM file) |
+| `2` | Synthesize new text during the call, including the current server time |
+| `3` | Choose `1` sales, `2` support, or `3` opening hours; hear your choice confirmed |
+| `4` | Enter exactly 10 digits followed by `#`; hear them read back individually |
+| `5` | Hear instructions and a beep, record for five seconds, then hear your recording |
+| `0` | Say goodbye and end the call |
+
+Each scenario returns to the menu. Keys pressed during a prompt are queued; they do not interrupt playback. Choice prompts allow 15 seconds for input after playback, with up to three attempts. Number entry allows 30 seconds and three attempts; fewer/more than ten digits, nonnumeric input, or a missing `#` are rejected. Leading zeroes are preserved. Entered digits are not logged.
+
+Generate the original demo melody once:
+
+```bash
+python3 scripts/create-demo-music.py
+```
+
+To substitute your own recording, convert it to raw PCM and set its absolute path:
+
+```bash
+ffmpeg -i your-music.wav -ar 16000 -ac 1 -c:a pcm_s16le -f s16le media/music.pcm
+export Demo__RecordingFile="$PWD/media/music.pcm"
+```
+
+Live speech is behind `ISpeechSynthesizer`. `MacSpeechSynthesizer` invokes `say` and FFmpeg for each utterance using temporary files and cancellation-aware child processes; it sends the resulting PCM over the existing media socket. This is synthesis at call time, not streaming partial synthesis chunks. Replace that implementation to connect another TTS or AI provider later.
+
+Optional settings:
+
+```bash
+export Speech__Voice=Samantha
+export Speech__FfmpegPath=/opt/homebrew/bin/ffmpeg
+export Demo__LiveText='This text can later come from an AI service.'
+```
+
+The current synthesizer requires macOS. Docker runs `Demo:Scenario=Echo` by default; do not enable Menu in Linux until a compatible speech provider is implemented. To run the original Echo flow locally, set `Demo__Scenario=Echo` before starting VoiceApp. Remove that override to return to Menu.
+
+## Generate an Echo announcement on macOS
 
 Run from the repository root:
 
@@ -73,7 +113,7 @@ Preview the generated raw file locally if desired:
 ffplay -f s16le -ar 16000 -ac 1 media/speech.pcm
 ```
 
-VoiceApp opens the configured file for each call, so regenerate it to change the next call's greeting. Synthesis is an explicit preparation step; VoiceApp does not invoke `say` for each call. This also works when VoiceApp runs in Linux Docker, where `say` is unavailable.
+VoiceApp opens the configured file for each call, so regenerate it to change the next Echo call's greeting. This file-based helper is separate from the menu's live synthesis. Prepared files also work when VoiceApp runs in Linux Docker, where `say` is unavailable.
 
 ## Option A: run VoiceApp locally
 
@@ -82,6 +122,7 @@ Run these commands from the repository root. If a Docker VoiceApp is already run
 ```bash
 docker compose stop voiceapp
 docker compose up -d asterisk
+python3 scripts/create-demo-music.py
 
 export Asterisk__Password='the-password-from-ari.conf'
 export Asterisk__AudioFile="$PWD/media/speech.pcm"
@@ -90,7 +131,7 @@ dotnet run --project src/VoiceApp --launch-profile http
 
 The `http` launch profile selects Development settings and listens at `http://localhost:5144`. `appsettings.Development.json` points ARI at `http://localhost:8088/ari/`, exposed by Asterisk's Docker port mapping. A local `dotnet run` does **not** automatically read Compose's `.env` file.
 
-Omit/unset `Asterisk__AudioFile` to use the test tone instead. The audio path above is absolute because `dotnet run` uses the application project as its working directory.
+`Asterisk__AudioFile` applies to the standalone Echo flow; omit/unset it to use the test tone there. The Menu flow generates its own prompts live. The audio path above is absolute because `dotnet run` uses the application project as its working directory.
 
 Check the local app in a second terminal:
 
@@ -156,7 +197,7 @@ docker compose exec asterisk asterisk -rx "pjsip show contacts"
 1. Confirm VoiceApp logs `Connected to Asterisk ARI` and Linphone is registered.
 2. Dial **500**.
 3. Look for `Media ready` and `Sending PCM file` (or `Sending 440 Hz test tone`).
-4. Listen for the announcement (or fallback tone), then the short beep. Speak for five seconds and listen for your recording to play back. Look for `Recording five seconds`, `Playing back 160000 recorded PCM bytes`, and `Echo sequence complete` in the app logs. The call stays open afterward.
+4. In local Menu mode, select an option with the keypad. For the echo test, press **5**, listen for the announcement and beep, then speak for five seconds and hear your recording. Docker/standalone Echo mode starts that sequence immediately. Look for `Recording five seconds`, `Playing back 160000 recorded PCM bytes`, and `Echo sequence complete` in the app logs. Menu mode returns to the main menu; standalone Echo mode keeps the call open afterward.
 5. Hang up. Check that the call's channels and bridge disappear:
 
 ```bash
@@ -200,9 +241,11 @@ Disable those logs afterward with `pjsip set logger off` and `rtp set debug off`
 ```bash
 dotnet build src/VoiceApp/VoiceApp.csproj
 dotnet run --project tests/VoiceApp.IntegrationTests
+# Also test the real macOS say/FFmpeg pipeline:
+dotnet run --project tests/VoiceApp.IntegrationTests -- --speech
 ```
 
-The dependency-free integration executable starts a simulated ARI/media server and checks tone delivery, PCM speech bytes and final-frame padding, fragmented plain-text/JSON `MEDIA_START`, XOFF/XON flow control, duplicate/media event filtering, hangup during setup, setup failure, host shutdown, media-leg departure, and beep/record/playback with byte-for-byte caller audio verification. It does not replace a real SIP audio test.
+The dependency-free integration executable starts a simulated ARI/media server and checks tone delivery, PCM speech bytes and final-frame padding, fragmented plain-text/JSON `MEDIA_START`, XOFF/XON flow control, duplicate/media event filtering, hangup during setup, setup failure, host shutdown, media-leg departure, and beep/record/playback with byte-for-byte caller audio verification. Additional checks cover all menu scenarios, ARI DTMF routing, invalid-input retries, ten-digit validation, leading zeroes, missing terminators, timeouts, and cancellation. It does not replace a real SIP audio test.
 
 After C# changes in Docker mode, run `docker compose up -d --build voiceapp` (retain `VOICE_AUDIO_FILE` if using speech). Local mode only needs an app restart or `dotnet watch`. After changing mounted Asterisk configuration, reload the affected module or run `docker compose restart asterisk`. Volume mapping changes require container recreation.
 

@@ -19,6 +19,8 @@ builder.Services.AddHttpClient<AsteriskClient>((sp, client) =>
         new AuthenticationHeaderValue("Basic", credentials);
 });
 
+builder.Services.AddSingleton<ISpeechSynthesizer, MacSpeechSynthesizer>();
+builder.Services.AddSingleton<DemoCallFlow>();
 builder.Services.AddHostedService<AsteriskEventService>();
 
 var app = builder.Build();

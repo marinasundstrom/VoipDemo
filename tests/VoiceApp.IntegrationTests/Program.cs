@@ -11,10 +11,82 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging.Abstractions;
 using VoiceApp.Services;
 
-foreach (var scenario in new[] { "tone", "speech", "early-hangup", "setup-failure", "shutdown", "media-exit", "flow-control", "echo" })
+foreach (var scenario in new[] { "tone", "speech", "early-hangup", "setup-failure", "shutdown", "media-exit", "flow-control", "echo", "menu-dtmf" })
 {
     await RunAsync(scenario);
     Console.WriteLine($"PASS {scenario}");
+}
+
+await CheckInputAsync();
+await CheckMenuAsync();
+if (OperatingSystem.IsMacOS() && args.Contains("--speech"))
+{
+    var speech = new MacSpeechSynthesizer(new ConfigurationBuilder().Build());
+    var pcm = await speech.SynthesizeAsync("This is live speech generated for the demo.");
+    Check(pcm.Length > 3200 && pcm.Length % 2 == 0 && pcm.Any(b => b != 0), "say returned invalid audio");
+    Console.WriteLine("PASS macOS live synthesis");
+}
+
+static async Task CheckInputAsync()
+{
+    foreach (var (entry, expected) in new (string, string?)[]
+    {
+        ("0123456789#", "0123456789"), ("123#", null), ("01234567890#", null),
+        ("0123456789", null), ("01234*6789#", null), ("#", null)
+    })
+    {
+        var input = new CallInput();
+        foreach (var digit in entry) input.Add(digit.ToString());
+        Check(await input.ReadTenDigitsAsync(TimeSpan.FromMilliseconds(10), CancellationToken.None) == expected,
+            "Incorrect number validation: " + entry);
+    }
+    var cancelled = new CallInput();
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try
+    {
+        await cancelled.ReadAsync(TimeSpan.FromSeconds(10), cancellation.Token);
+        throw new Exception("Hangup did not cancel input");
+    }
+    catch (OperationCanceledException) { }
+    Console.WriteLine("PASS DTMF validation, leading zeroes, terminator, timeout, cancellation");
+}
+
+static async Task CheckMenuAsync()
+{
+    var input = new CallInput();
+    var mainChoices = new Queue<char>("123450");
+    var optionChoices = new Queue<char>("92");
+    var entries = new Queue<string>(["123#", "0123456789#"]);
+    var spoken = new List<string>();
+    var speech = new FakeSpeech(text =>
+    {
+        spoken.Add(text);
+        if (text.StartsWith("Welcome")) input.Add(mainChoices.Dequeue().ToString());
+        else if (text.StartsWith("Choose an option")) input.Add(optionChoices.Dequeue().ToString());
+        else if (text.StartsWith("Enter exactly"))
+            foreach (var digit in entries.Dequeue()) input.Add(digit.ToString());
+    });
+    var file = Path.GetTempFileName();
+    try
+    {
+        await File.WriteAllBytesAsync(file, [1, 2, 3, 4]);
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Demo:Scenario"] = "Menu", ["Demo:RecordingFile"] = file
+        }).Build();
+        var media = new FakeMedia();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await new DemoCallFlow(config, speech, NullLogger<DemoCallFlow>.Instance).RunAsync(media, input, timeout.Token);
+        Check(media.FileBytes?.SequenceEqual(new byte[] { 1, 2, 3, 4 }) == true, "Recording file not played");
+        Check(spoken.Any(s => s.Contains("server time is")), "Live text not synthesized");
+        Check(spoken.Contains("You selected support."), "Choice not confirmed");
+        Check(spoken.Contains("You entered: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9."), "Number not spoken digit by digit");
+        Check(media.Recorded && media.EchoPlayed, "Echo scenario did not play captured input");
+        Check(spoken.Last() == "Goodbye." && mainChoices.Count == 0, "Menu did not exit cleanly");
+        Console.WriteLine("PASS all menu scenarios and invalid-input retries");
+    }
+    finally { File.Delete(file); }
 }
 
 static async Task RunAsync(string scenario)
@@ -116,7 +188,7 @@ static async Task RunAsync(string scenario)
             await socket.SendAsync(bytes.AsMemory(10), WebSocketMessageType.Text, true, ct);
             using var audio = new MemoryStream();
             var buffer = new byte[8192];
-            var expectedLength = sourceAudio is null ? 32000 : 1920;
+            var expectedLength = scenario == "menu-dtmf" ? 3200 : sourceAudio is null ? 32000 : 1920;
             if (scenario == "flow-control")
             {
                 var pending = socket.ReceiveAsync(buffer.AsMemory(), ct).AsTask();
@@ -189,10 +261,26 @@ static async Task RunAsync(string scenario)
         ["Asterisk:BaseUrl"] = baseUrl,
         ["Asterisk:Username"] = "test",
         ["Asterisk:Password"] = "test",
-        ["Asterisk:AudioFile"] = sourceAudio is null ? null : audioPath
+        ["Asterisk:AudioFile"] = sourceAudio is null ? null : audioPath,
+        ["Demo:Scenario"] = scenario == "menu-dtmf" ? "Menu" : "Echo"
     }).Build();
     using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
-    using var service = new AsteriskEventService(configuration, new AsteriskClient(http), NullLogger<AsteriskEventService>.Instance);
+    var menuChoices = new Queue<char>("30");
+    var confirmedChoice = false;
+    ISpeechSynthesizer synthesizer = new FakeSpeech(text =>
+    {
+        char? digit = text.StartsWith("Welcome") ? menuChoices.Dequeue()
+            : text.StartsWith("Choose an option") ? '2' : null;
+        if (text == "You selected support.") confirmedChoice = true;
+        if (digit.HasValue)
+            events.Writer.TryWrite(JsonSerializer.Serialize(new
+            {
+                type = "ChannelDtmfReceived", channel = new { id = "caller" }, digit = digit.ToString()
+            }));
+    });
+    using var service = new AsteriskEventService(configuration, new AsteriskClient(http),
+        new DemoCallFlow(configuration, synthesizer, NullLogger<DemoCallFlow>.Instance),
+        NullLogger<AsteriskEventService>.Instance);
     try
     {
         await service.StartAsync(ct);
@@ -209,6 +297,7 @@ static async Task RunAsync(string scenario)
                 Check(audio.AsSpan(0, sourceAudio.Length).SequenceEqual(sourceAudio), "Speech bytes changed");
                 Check(audio.AsSpan(sourceAudio.Length).ToArray().All(b => b == 0), "Final frame must be silence padded");
             }
+            else if (scenario == "menu-dtmf") Check(confirmedChoice, "ARI DTMF did not reach call menu");
             else Check(audio.Length == 32000 && audio.Any(b => b != 0), "Missing test tone");
         }
         if (scenario == "media-exit")
@@ -243,4 +332,39 @@ static string Event(string type, string id, string name) => JsonSerializer.Seria
 static void Check(bool condition, string message)
 {
     if (!condition) throw new Exception(message);
+}
+
+sealed class FakeSpeech(Action<string> onSpeech) : ISpeechSynthesizer
+{
+    public Task<byte[]> SynthesizeAsync(string text, CancellationToken cancellationToken = default)
+    {
+        onSpeech(text);
+        return Task.FromResult(new byte[640]);
+    }
+}
+
+sealed class FakeMedia : ICallMedia
+{
+    private readonly byte[] recorded = [8, 7, 6, 5];
+    public byte[]? FileBytes { get; private set; }
+    public bool Recorded { get; private set; }
+    public bool EchoPlayed { get; private set; }
+    public Task Completion => Task.CompletedTask;
+    public Task SendAudioAsync(ReadOnlyMemory<byte> pcmAudio, CancellationToken cancellationToken = default)
+    {
+        if (Recorded && pcmAudio.Span.SequenceEqual(recorded)) EchoPlayed = true;
+        return Task.CompletedTask;
+    }
+    public async Task SendAudioAsync(Stream pcmAudio, CancellationToken cancellationToken = default)
+    {
+        using var buffer = new MemoryStream();
+        await pcmAudio.CopyToAsync(buffer, cancellationToken);
+        FileBytes = buffer.ToArray();
+    }
+    public Task<byte[]> RecordAudioAsync(TimeSpan duration, CancellationToken cancellationToken = default)
+    {
+        if (duration != TimeSpan.FromSeconds(5)) throw new Exception("Incorrect recording duration");
+        Recorded = true;
+        return Task.FromResult(recorded);
+    }
 }

@@ -5,7 +5,7 @@ using System.Threading.Channels;
 
 namespace VoiceApp.Services;
 
-public sealed class AsteriskMediaSession : IAsyncDisposable
+public sealed class AsteriskMediaSession : IAsyncDisposable, ICallMedia
 {
     private readonly ClientWebSocket socket = new();
     private readonly CancellationTokenSource lifetime = new();

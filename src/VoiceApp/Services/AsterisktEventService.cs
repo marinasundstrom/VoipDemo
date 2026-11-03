@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
@@ -9,6 +8,7 @@ namespace VoiceApp.Services;
 public sealed class AsteriskEventService(
     IConfiguration configuration,
     AsteriskClient asterisk,
+    DemoCallFlow flow,
     ILogger<AsteriskEventService> logger) : BackgroundService
 {
     private const string MediaChannelPrefix = "voiceapp-media-";
@@ -109,8 +109,8 @@ public sealed class AsteriskEventService(
                 // Media channel events must never tear down the caller's session.
                 break;
             case "ChannelDtmfReceived":
-                logger.LogInformation("Caller pressed {Digit} on {ChannelId}",
-                    root.GetProperty("digit").GetString(), channelId);
+                if (sessions.TryGetValue(channelId, out var caller))
+                    caller.Input.Add(root.GetProperty("digit").GetString());
                 break;
         }
     }
@@ -145,28 +145,8 @@ public sealed class AsteriskEventService(
             logger.LogInformation("Media ready for {ChannelId}", session.ChannelId);
             try
             {
-                var audioFile = configuration["Asterisk:AudioFile"];
-                if (string.IsNullOrWhiteSpace(audioFile))
-                {
-                    logger.LogInformation("Sending 440 Hz test tone to {ChannelId}", session.ChannelId);
-                    await session.Media.SendAudioAsync(CreateTone(440, 1.0), lifetime.Token);
-                }
-                else
-                {
-                    await using var audio = File.OpenRead(audioFile);
-                    logger.LogInformation("Sending PCM file {AudioFile} to {ChannelId}", audioFile, session.ChannelId);
-                    await session.Media.SendAudioAsync(audio, lifetime.Token);
-                }
-                // Leave a short gap for the queued final prompt frame to reach the caller.
-                await Task.Delay(250, lifetime.Token);
-                await session.Media.SendAudioAsync(CreateTone(1000, 0.2), lifetime.Token);
-                await Task.Delay(250, lifetime.Token);
-                logger.LogInformation("Recording five seconds from {ChannelId}", session.ChannelId);
-                var recording = await session.Media.RecordAudioAsync(TimeSpan.FromSeconds(5), lifetime.Token);
-                logger.LogInformation("Playing back {Bytes} recorded PCM bytes to {ChannelId}", recording.Length, session.ChannelId);
-                await session.Media.SendAudioAsync(recording, lifetime.Token);
-                logger.LogInformation("Echo sequence complete for {ChannelId}", session.ChannelId);
-                await session.Media.Completion.WaitAsync(lifetime.Token);
+                await flow.RunAsync(session.Media, session.Input, lifetime.Token);
+                return;
             }
             catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
             {
@@ -206,18 +186,4 @@ public sealed class AsteriskEventService(
         catch (Exception ex) { logger.LogWarning(ex, "Could not remove {Resource} for {ChannelId}", resource, channelId); }
     }
 
-    private static byte[] CreateTone(double frequency, double seconds)
-    {
-        const int sampleRate = 16000;
-        var samples = (int)(sampleRate * seconds);
-        var audio = new byte[samples * 2];
-        for (var i = 0; i < samples; i++)
-        {
-            // Fade edges to avoid clicks; signed 16-bit little-endian, mono, no WAV header.
-            var envelope = Math.Min(1.0, Math.Min(i, samples - 1 - i) / 160.0);
-            var sample = (short)(6000 * envelope * Math.Sin(2 * Math.PI * frequency * i / sampleRate));
-            BinaryPrimitives.WriteInt16LittleEndian(audio.AsSpan(i * 2), sample);
-        }
-        return audio;
-    }
 }
