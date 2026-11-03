@@ -25,12 +25,4 @@ var app = builder.Build();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-var password = builder.Configuration["Asterisk:Password"];
-
-Console.WriteLine(
-    $"ARI password configured: {!string.IsNullOrEmpty(password)}");
-
-Console.WriteLine(
-    $"ARI password length: {password?.Length ?? 0}");
-
 app.Run();

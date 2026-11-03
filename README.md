@@ -1,329 +1,222 @@
 # VoipDemo
 
-A Docker-based VoIP proof of concept using **Asterisk**, **ASP.NET Core**, and a SIP softphone such as **Linphone**.
+A VoIP proof of concept using Asterisk, ASP.NET Core, and a SIP softphone such as Linphone. Dial **500** to hear an announcement, hear a beep, speak for five seconds, and hear your recording played back through an Asterisk media WebSocket.
 
-The application receives calls through Asterisk's REST Interface (ARI). When a caller dials extension **500**, Asterisk hands control to the .NET application, which answers the call and requests playback of a custom greeting.
+VoiceApp can run **locally on macOS** while Asterisk runs in Docker, or both can run in Docker. Speech is generated on the Mac using `say`, converted to raw PCM with FFmpeg, and read by VoiceApp. Without an audio file configured, the app sends a one-second 440 Hz test tone.
 
-## Architecture
-
-```text
-Linphone (SIP extension 1001)
-         | SIP / RTP
-         v
-Asterisk (Docker)
-         | ARI REST + event WebSocket
-         v
-VoiceApp (ASP.NET Core)
-         | answer / play commands
-         v
-Asterisk -> RTP audio -> Linphone
-```
-
-Asterisk handles SIP signaling and RTP media. VoiceApp handles call events and call-control commands. **The current implementation plays a prerecorded sound; it does not yet stream audio through .NET or use AI.**
-
-## Project layout
+## How it works
 
 ```text
-VoipDemo/
-├── compose.yaml
-├── .env                  # local secret; do not commit
-├── asterisk/
-│   ├── Dockerfile
-│   ├── ari.conf
-│   ├── extensions.conf
-│   ├── http.conf
-│   ├── pjsip.conf
-│   ├── rtp.conf
-│   └── sounds/
-│       └── greeting.wav  # or a compatible greeting.slin
-└── src/
-    └── VoiceApp/
-        ├── Dockerfile
-        ├── Program.cs
-        └── Services/
-            ├── AsteriskClient.cs
-            └── AsteriskEventService.cs
+Linphone (extension 1001) <-- SIP / RTP --> Asterisk
+                                             |
+                       mixing bridge: caller + WebSocket media channel
+                                             |
+                                  media WebSocket (slin16)
+                                             |
+                                          VoiceApp
+                                             ^
+                                  raw PCM file from macOS say
+
+VoiceApp also connects to Asterisk's separate ARI REST API and event WebSocket.
 ```
+
+For each incoming call, VoiceApp answers, creates a mixing bridge, adds the caller, creates an incoming WebSocket external-media channel, and connects to `/media/{connectionId}`. After `MEDIA_START` and the media channel’s `StasisStart`, it adds that channel to the bridge and sends audio as binary frames. Connecting first matters: Asterisk can reject bridge insertion with HTTP 422 before the media channel enters Stasis. Both plain-text and JSON media control events are supported.
+
+Call tasks run independently of the ARI event receive loop. Explicit media channel IDs and the `WebSocket/` name filter prevent recursive call setup. Caller hangup, setup failure, application shutdown, or ARI disconnection triggers cleanup of the media socket, external channel, bridge, and caller channel. A media channel leaving Stasis alone does not end the caller session. A lost ARI connection ends active calls because their state can no longer be tracked reliably.
+
+After the announcement, VoiceApp plays a 200 ms beep, captures five seconds of incoming PCM in memory, and streams that recording back once. Audio received before the recording window is discarded; the call stays open after playback. Nothing is saved to disk. There is no speech recognition or AI integration yet.
 
 ## Prerequisites
 
-- Docker Desktop with Docker Compose
-- A SIP softphone (tested with Linphone on macOS)
-- .NET SDK if developing VoiceApp outside Docker
-- FFmpeg if converting or generating custom audio files
+- Docker Desktop with Docker Compose for Asterisk.
+- A SIP softphone (tested with Linphone on macOS).
+- .NET **11 SDK** for running VoiceApp locally; the project currently uses a prerelease .NET 11 OpenAPI package.
+- macOS `say` and FFmpeg (`brew install ffmpeg`) for speech synthesis.
+- Asterisk with `chan_websocket`. The locally checked image was certified-22.8-cert5 and included the module. The `22-cert` image tag can change, so verify the installed module below.
 
-## Configuration
+See the [Asterisk WebSocket channel documentation](https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/) for protocol and version requirements.
 
-### Environment variables
+## Configure credentials
 
-Create `.env` alongside `compose.yaml`:
+Create `.env` in the repository root:
 
 ```dotenv
-ARI_PASSWORD=choose-a-strong-local-secret
+ARI_PASSWORD=choose-a-local-secret
 ```
 
-The `voiceapp` service reads the value through Docker Compose:
+Set the same password in `asterisk/ari.conf`, under `[voiceapp]`. Compose reads `.env` for the application environment; it does **not** substitute values inside `ari.conf`. Do not commit real credentials.
 
-```yaml
-environment:
-  Asterisk__BaseUrl: http://asterisk:8088/ari/
-  Asterisk__Username: voiceapp
-  Asterisk__Password: ${ARI_PASSWORD}
+The SIP credentials for extension **1001** are separate and live in `asterisk/pjsip.conf`.
+
+The dialplan in `asterisk/extensions.conf` routes extension 500 to `Stasis(voiceapp)`. VoiceApp answers through ARI; the dialplan does not answer first.
+
+## Generate speech on macOS
+
+Run from the repository root:
+
+```bash
+./scripts/synthesize-speech.sh "Hello! After the beep, say something. I will record you for five seconds, then play it back."
 ```
 
-ASP.NET Core maps `Asterisk__Password` to `Asterisk:Password`. You do not need to store the password in `appsettings.json`.
+The default output is `media/speech.pcm`, which is ignored by Git. Optionally specify an output path and an installed voice:
 
-**Important:** The ARI password in `asterisk/ari.conf` must match `ARI_PASSWORD`. Compose does not substitute variables inside `ari.conf` automatically.
-
-### Asterisk ARI
-
-`asterisk/ari.conf`:
-
-```ini
-[general]
-enabled=yes
-pretty=yes
-
-[voiceapp]
-type=user
-read_only=no
-password_format=plain
-password=choose-a-strong-local-secret
+```bash
+say -v '?'
+./scripts/synthesize-speech.sh "Hello from your Mac." media/speech.pcm Samantha
 ```
 
-The `voiceapp` ARI application name is also used by the dialplan and WebSocket subscription. The ARI account name and application name happen to match here, but they are separate concepts.
+The helper writes speech to a temporary AIFF file using `say`, then converts it with FFmpeg to **16 kHz, mono, signed 16-bit little-endian PCM**. It replaces the output only after conversion succeeds. Do not pass WAV or AIFF files directly to the media sender: their headers would be interpreted as audio.
 
-### SIP endpoint and dialplan
+Preview the generated raw file locally if desired:
 
-The local test SIP account is extension **1001**. Its credentials are configured in `asterisk/pjsip.conf`, separately from the ARI credentials. Use a strong SIP password if the service is accessible beyond a trusted development network.
-
-The dialplan routes extension **500** to the ARI application:
-
-```ini
-[internal]
-exten => 500,1,Stasis(voiceapp)
- same => n,Hangup()
+```bash
+ffplay -f s16le -ar 16000 -ac 1 media/speech.pcm
 ```
 
-VoiceApp answers the call through ARI. Avoid answering the call twice in both the dialplan and application.
+VoiceApp opens the configured file for each call, so regenerate it to change the next call's greeting. Synthesis is an explicit preparation step; VoiceApp does not invoke `say` for each call. This also works when VoiceApp runs in Linux Docker, where `say` is unavailable.
 
-### Mount configuration and sounds
+## Option A: run VoiceApp locally
 
-For development, mount Asterisk configuration directly rather than baking it into the image:
+Run these commands from the repository root. If a Docker VoiceApp is already running, stop it so only one app controls `voiceapp` calls:
 
-```yaml
-services:
-  asterisk:
-    build: ./asterisk
-    ports:
-      - "5060:5060/udp"
-      - "10000-10099:10000-10099/udp"
-      - "127.0.0.1:8088:8088"
-    volumes:
-      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
-      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
-      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
-      - ./asterisk/ari.conf:/etc/asterisk/ari.conf:ro
-      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
-      - ./asterisk/sounds:/var/lib/asterisk/sounds/custom:ro
-    networks:
-      - voip
+```bash
+docker compose stop voiceapp
+docker compose up -d asterisk
+
+export Asterisk__Password='the-password-from-ari.conf'
+export Asterisk__AudioFile="$PWD/media/speech.pcm"
+dotnet run --project src/VoiceApp --launch-profile http
 ```
 
-The `voiceapp` service should also join the `voip` network. Inside that network it reaches Asterisk at `http://asterisk:8088/ari/`. Binding port 8088 to `127.0.0.1` restricts host access to local development.
+The `http` launch profile selects Development settings and listens at `http://localhost:5144`. `appsettings.Development.json` points ARI at `http://localhost:8088/ari/`, exposed by Asterisk's Docker port mapping. A local `dotnet run` does **not** automatically read Compose's `.env` file.
 
-Mounted file changes are visible immediately inside the container, but Asterisk may need a module reload or restart to apply configuration changes. Compose volume-map changes require container recreation.
+Omit/unset `Asterisk__AudioFile` to use the test tone instead. The audio path above is absolute because `dotnet run` uses the application project as its working directory.
 
-## Start the services
+Check the local app in a second terminal:
 
-From the directory containing `compose.yaml`:
+```bash
+curl http://localhost:5144/health
+```
+
+`/health` reports that the HTTP app is running; it does not guarantee Asterisk connectivity. Wait for `Connected to Asterisk ARI` in the application logs. Stop the local app with Ctrl+C before switching to Docker mode. For automatic rebuilds, use `dotnet watch --project src/VoiceApp run --launch-profile http` with the same environment variables.
+
+## Option B: run both services in Docker
+
+Generate speech on the Mac first, then run:
+
+```bash
+VOICE_AUDIO_FILE=/app/media/speech.pcm docker compose up -d --build
+```
+
+Compose mounts `./media` read-only at `/app/media`. Add `VOICE_AUDIO_FILE=/app/media/speech.pcm` to `.env` if you want subsequent Compose commands to retain the speech setting. Leave it empty/unset to use the test tone:
 
 ```bash
 docker compose up -d --build
+docker compose logs -f voiceapp
 ```
 
-Check status and logs:
+Inside Docker, VoiceApp reaches ARI at `http://asterisk:8088/ari/`. The media WebSocket uses the same host, port, and TLS scheme with a `/media/` path. For another Asterisk host, override `Asterisk__BaseUrl`.
+
+`depends_on` controls startup order, not readiness. VoiceApp retries the ARI event connection every five seconds. The existing VoiceApp Dockerfile requires the .NET 11 SDK and ASP.NET runtime images to be available; local mode uses your installed SDK instead.
+
+## Verify Asterisk
 
 ```bash
 docker compose ps
-docker compose logs -f voiceapp
-docker compose logs -f asterisk
-```
-
-VoiceApp should report `Connected to Asterisk ARI` once its event WebSocket subscription is established. `depends_on` controls startup order, not readiness; the event listener reconnects if Asterisk is still starting.
-
-## Verify ARI
-
-Test the ARI REST API from the Mac:
-
-```bash
+docker compose exec asterisk asterisk -rx "core show version"
+docker compose exec asterisk asterisk -rx "module show like websocket"
+docker compose exec asterisk asterisk -rx "http show status"
+docker compose exec asterisk asterisk -rx "ari show apps"
 curl -i -u voiceapp http://localhost:8088/ari/asterisk/info
 ```
 
-Enter the password from `.env` when prompted. Expect **HTTP 200**. HTTP 401 means Asterisk rejected the credentials.
+Enter the ARI password when curl prompts. Expect HTTP 200 and a loaded `chan_websocket.so`. The incoming media connection uses Asterisk's HTTP server and requires no outbound `websocket_client.conf` entry. ARI and media use separate WebSocket connections.
 
-Inspect the active configuration and registered ARI application:
+## Configure Linphone and test a call
 
-```bash
-docker compose exec asterisk asterisk -rx "ari show users"
-docker compose exec asterisk asterisk -rx "ari show apps"
-docker compose exec asterisk cat /etc/asterisk/ari.conf
-```
+Create a manual SIP account:
 
-The event listener subscribes to `/ari/events?app=voiceapp` using ARI authentication. Do not log the full WebSocket URL if it includes `api_key=username:password`.
-
-## Configure Linphone
-
-Create a manual SIP account using the credentials from `pjsip.conf`:
-
-| Setting | Local test value |
+| Setting | Value |
 | --- | --- |
 | Username | `1001` |
 | Authentication ID | `1001` |
-| Password | SIP password from `pjsip.conf` |
-| Domain / SIP server | Mac's reachable LAN IP address |
+| Password | SIP password from `asterisk/pjsip.conf` |
+| Domain / SIP server | Mac's reachable LAN IP address (currently `192.168.1.24`) |
+| Registrar URI | `sip:192.168.1.24;transport=udp` (replace IP with your Mac's address) |
+| Outbound SIP Proxy URI | Same LAN URI, especially if the existing account identity still uses `127.0.0.1` |
 | Transport | UDP |
 
-**Authentication ID matters:** registration initially failed until it was explicitly set to `1001`.
-
-Verify registration:
+Explicitly set Authentication ID; leaving it empty caused registration failures during initial testing.
 
 ```bash
 docker compose exec asterisk asterisk -rx "pjsip show endpoints"
 docker compose exec asterisk asterisk -rx "pjsip show contacts"
 ```
 
-The endpoint can exist while being `Unavailable` if Linphone has not registered.
-
-## Audio greeting
-
-Place a compatible audio file in `asterisk/sounds/`, mounted to `/var/lib/asterisk/sounds/custom/` in the container.
-
-For example, convert a recording to mono, 8 kHz, signed 16-bit PCM WAV:
+1. Confirm VoiceApp logs `Connected to Asterisk ARI` and Linphone is registered.
+2. Dial **500**.
+3. Look for `Media ready` and `Sending PCM file` (or `Sending 440 Hz test tone`).
+4. Listen for the announcement (or fallback tone), then the short beep. Speak for five seconds and listen for your recording to play back. Look for `Recording five seconds`, `Playing back 160000 recorded PCM bytes`, and `Echo sequence complete` in the app logs. The call stays open afterward.
+5. Hang up. Check that the call's channels and bridge disappear:
 
 ```bash
-ffmpeg -i input.wav -ar 8000 -ac 1 -c:a pcm_s16le asterisk/sounds/greeting.wav
+docker compose exec asterisk asterisk -rx "core show channels"
+docker compose exec asterisk asterisk -rx "bridge show all"
 ```
 
-Or generate raw 8 kHz signed linear audio with the `.slin` extension:
+An accepted API request or logged send does not prove sound reached the phone; listening to a SIP call is the final audio-delivery check.
 
-```bash
-ffmpeg -i input.wav -f s16le -ar 8000 -ac 1 asterisk/sounds/greeting.slin
-```
-
-Do not rename a WAV file to `.slin` without converting its contents.
-
-Verify that Asterisk sees the sound:
-
-```bash
-docker compose exec asterisk asterisk -rx "core show sounds"
-```
-
-The .NET call handler requests playback by **sound identifier**, without a file extension:
-
-```csharp
-await asterisk.PlayAsync(channelId, "custom/greeting", cancellationToken);
-```
-
-A successful ARI playback request means Asterisk accepted the command; it does not prove the caller heard audio. Observe playback events and RTP diagnostics when troubleshooting.
-
-## Make a test call
-
-1. Confirm VoiceApp is connected to ARI and Linphone is registered.
-2. Dial **500** in Linphone.
-3. Asterisk enters `Stasis(voiceapp)`.
-4. VoiceApp receives `StasisStart`, answers, and requests `custom/greeting` playback.
-5. Asterisk streams the greeting to Linphone over RTP.
-
-To inspect Asterisk during a call:
-
-```bash
-docker compose exec asterisk asterisk -rvvv
-```
-
-Then enable:
-
-```text
-core set verbose 5
-pjsip set logger on
-rtp set debug on
-```
-
-Turn off verbose RTP logging afterward with `rtp set debug off`.
+Verified on 2026-11-03 with local VoiceApp and Docker Asterisk: calling `sip:500@192.168.1.24` in Linphone played the announcement and beep, recorded five seconds, and played the caller audio back. RTP flowed in both directions after replacing the loopback SIP destination.
 
 ## macOS / Docker Desktop RTP networking
 
-A key issue during testing was that Asterisk played `custom/greeting.slin` but sent RTP to **127.0.0.1**. Inside a container, that loopback address refers to the container itself, not Linphone on the Mac.
+Use the Mac's reachable LAN address in Linphone. **Do not use `localhost` or `127.0.0.1` as the SIP server, registrar, or outbound proxy when Asterisk runs in Docker—even when VoiceApp runs locally.** Docker forwards SIP signaling, so registration and answering can succeed while media is completely silent.
 
-The working setup used the Mac's reachable LAN address for SIP/media instead of loopback. In this development session, the Mac's address was **192.168.1.24**; replace it with the current address on your network.
+This failure recurred during the WebSocket speech test: VoiceApp logged `Media ready` and began sending a valid, non-silent PCM file, but Linphone's SDP contained `c=IN IP4 127.0.0.1`. Asterisk then logged `Sent RTP packet to 127.0.0.1:63286`. That loopback address belongs to the Asterisk container, not the Mac. Successful ARI/WebSocket setup does not rule out this problem.
 
-For a Docker Desktop setup, the Asterisk PJSIP transport may need settings similar to:
+In Linphone, open **Account list → Account settings → Account settings** and set **Registrar URI** and **Outbound SIP Proxy URI** to `sip:192.168.1.24;transport=udp`, using your current Mac LAN address, then save. Setting the outbound proxy also routes calls correctly when an older account identity still contains `1001@127.0.0.1`. For a new account, use the LAN address as its domain from the start. For the verification call, type **`sip:500@192.168.1.24`** explicitly instead of selecting an old call-history entry, which may retain `500@127.0.0.1`. Redial after making the change; an existing call keeps its negotiated addresses.
 
-```ini
-[transport-udp]
-type=transport
-protocol=udp
-bind=0.0.0.0:5060
-local_net=172.22.0.0/16
-external_signaling_address=192.168.1.24
-external_media_address=192.168.1.24
-```
+Keep VoiceApp's local ARI URL as `http://localhost:8088/ari/`: that is a separate HTTP connection, and localhost is correct there.
 
-**Do not copy these IP values blindly.** Verify your current Mac IP and Docker subnet:
+Check your addresses:
 
 ```bash
 ipconfig getifaddr en0
 docker network inspect voipdemo_voip --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
 ```
 
-Also ensure Linphone advertises a media address reachable by Asterisk; disable STUN/ICE temporarily when diagnosing a local setup. Asterisk's external address settings affect what it advertises, not necessarily the destination it learns from the client's SDP or RTP packets.
+The `voip` network is pinned to **`172.19.0.0/16`** using Compose IPAM, and Asterisk's `local_net` matches it. Docker will preserve this subnet when recreating the stack instead of choosing another one. If it overlaps a VPN or another network on your machine, choose an unused subnet and update both `compose.yaml` and `asterisk/pjsip.conf` together.
 
-After changing transport configuration, restart Asterisk and inspect the negotiated SDP (`c=IN IP4`, `m=audio`) and RTP debug output.
+The Mac's LAN address is independent of Docker IPAM. **Reserve `192.168.1.24` for this Mac in your router's DHCP settings** so Linphone's registrar/proxy and Asterisk's advertised addresses remain valid. A DHCP reservation is not created by this repository. If a reservation is unavailable, you must update those settings whenever the Mac's LAN IP changes. Avoid assigning a manual static IP without coordinating it with the router's DHCP range.
 
-## Common problems
+Adjust `local_net`, `external_signaling_address`, and `external_media_address` in the PJSIP transport to match your Docker subnet and Mac LAN address. The checked-in addresses are development values, not portable defaults. Linphone must also advertise a media address reachable from Asterisk; temporarily disabling STUN/ICE can help diagnose a local setup.
+
+Use `docker compose exec asterisk asterisk -rvvv`, then `pjsip set logger on` and `rtp set debug on` to inspect SDP and RTP destinations. On the next call, verify that the SDP `c=IN IP4` addresses and `Sent RTP packet to` destination are reachable from the other side, rather than loopback or an unreachable container address.
+
+Disable those logs afterward with `pjsip set logger off` and `rtp set debug off`. Restart Asterisk after changing transport settings.
+
+## Development and checks
+
+```bash
+dotnet build src/VoiceApp/VoiceApp.csproj
+dotnet run --project tests/VoiceApp.IntegrationTests
+```
+
+The dependency-free integration executable starts a simulated ARI/media server and checks tone delivery, PCM speech bytes and final-frame padding, fragmented plain-text/JSON `MEDIA_START`, XOFF/XON flow control, duplicate/media event filtering, hangup during setup, setup failure, host shutdown, media-leg departure, and beep/record/playback with byte-for-byte caller audio verification. It does not replace a real SIP audio test.
+
+After C# changes in Docker mode, run `docker compose up -d --build voiceapp` (retain `VOICE_AUDIO_FILE` if using speech). Local mode only needs an app restart or `dotnet watch`. After changing mounted Asterisk configuration, reload the affected module or run `docker compose restart asterisk`. Volume mapping changes require container recreation.
+
+## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| `no configuration file provided` | Run Compose from the directory containing `compose.yaml`, or use `-f` |
-| ARI WebSocket returns HTTP 401 | Match `.env` and the **active** `/etc/asterisk/ari.conf`; verify REST with `curl` first |
-| Changes to `ari.conf` seem ignored | Confirm the mounted file inside the container; reload ARI or restart Asterisk |
-| SIP endpoint is `Unavailable` | Verify Linphone registration, SIP password, and Authentication ID |
-| `Unable to open hello-world` | Change the .NET playback identifier to `custom/greeting` and rebuild VoiceApp |
-| Playback starts but no sound | Inspect RTP destination and SDP; avoid container-local `127.0.0.1` |
-| `204 No Content` from playback API | Request accepted, but playback/audio delivery still needs verification |
+| ARI HTTP 401 | Match the application password and active `ari.conf`; local mode needs `Asterisk__Password` |
+| Local app cannot resolve `asterisk` | Use the `http` launch profile or set `Asterisk__BaseUrl=http://localhost:8088/ari/` |
+| External-media creation fails | Verify Asterisk version and loaded `chan_websocket.so` |
+| No `MEDIA_START` | Inspect `/media/` reachability and Asterisk logs; connection setup has a timeout |
+| Audio file not found | Use an absolute host path locally; `/app/media/speech.pcm` inside Docker |
+| Distorted speech | Use the helper's raw PCM output, not WAV/AIFF or 8 kHz audio |
+| Media ready but silence on phone | Inspect RTP destination, SDP, and Linphone registration |
+| Duplicate call handling | Ensure only one VoiceApp instance is running |
 
-## Development workflow
-
-- After changing **C# code**, rebuild and recreate VoiceApp:
-
-  ```bash
-  docker compose up -d --build --force-recreate voiceapp
-  ```
-
-- After changing **mounted Asterisk configuration**, reload the appropriate module or restart Asterisk:
-
-  ```bash
-  docker compose restart asterisk
-  ```
-
-- After changing **Compose mounts**, recreate the affected container:
-
-  ```bash
-  docker compose up -d --force-recreate asterisk
-  ```
-
-- After changing **mounted audio files**, no image rebuild is necessary.
-
-## Next steps: dynamic voice and AI
-
-The current proof of concept demonstrates SIP registration, ARI call control, custom audio playback, and working RTP routing.
-
-Possible next milestones:
-
-1. Track `PlaybackStarted`, `PlaybackFinished`, and call termination events in a per-call session.
-2. Generate speech dynamically through a text-to-speech service.
-3. Introduce Asterisk External Media to stream audio to and from a .NET audio processor.
-4. Add speech recognition and conversational AI, or a realtime speech-to-speech model.
-5. Add interruption handling, cancellation, audio format negotiation, and production-grade authentication/TLS.
-
-This is a **local development proof of concept**, not a hardened public SIP/telephony deployment. Do not expose ARI or unauthenticated SIP endpoints publicly.
+This is a local development proof of concept. ARI is bound to host loopback in Compose; do not expose this test configuration publicly. Future work includes speech recognition/AI, silence-based recording termination, and interruption handling.

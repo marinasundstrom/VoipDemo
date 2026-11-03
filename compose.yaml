@@ -21,6 +21,9 @@ services:
       Asterisk__BaseUrl: http://asterisk:8088/ari/
       Asterisk__Username: voiceapp
       Asterisk__Password: ${ARI_PASSWORD}
+      Asterisk__AudioFile: ${VOICE_AUDIO_FILE:-}
+    volumes:
+      - ./media:/app/media:ro
     depends_on:
       - asterisk
     networks:
@@ -28,3 +31,6 @@ services:
 
 networks:
   voip:
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
