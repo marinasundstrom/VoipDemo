@@ -2,6 +2,8 @@ using CustomerServiceApp.Services;
 using Voip.Telephony;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddOpenApi();
+
 builder.Services.AddAsteriskTelephony<CustomerServiceFlow>();
 builder.Services.AddSingleton<ISpeechSynthesizer, MacSpeechSynthesizer>();
 builder.Services.AddSingleton(TimeProvider.System);
@@ -21,6 +23,12 @@ builder.Services.AddSingleton(services =>
     return new CallQueueManager(destinations, mode);
 });
 var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapGet("/service", (ServiceAvailability service) => Results.Ok(new
 {

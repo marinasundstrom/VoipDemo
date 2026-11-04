@@ -1,0 +1,40 @@
+
+@baseUrl = http://localhost:5146
+@agentId = agent-1
+@callId = replace-with-call-id
+
+### Health check
+GET {{baseUrl}}/health
+Accept: application/json
+
+### Get service availability
+GET {{baseUrl}}/service
+Accept: application/json
+
+### Set service to automatic schedule
+PUT {{baseUrl}}/service/Schedule
+Accept: application/json
+
+### Force service open
+PUT {{baseUrl}}/service/Open
+Accept: application/json
+
+### Force service closed
+PUT {{baseUrl}}/service/Closed
+Accept: application/json
+
+### Get call queue status
+GET {{baseUrl}}/queue
+Accept: application/json
+
+### Get agents
+GET {{baseUrl}}/agents
+Accept: application/json
+
+### Agent accepts waiting call
+POST {{baseUrl}}/agents/{{agentId}}/accept/{{callId}}
+Accept: application/json
+
+### OpenAPI document (Development only)
+GET {{baseUrl}}/openapi/v1.json
+Accept: application/json

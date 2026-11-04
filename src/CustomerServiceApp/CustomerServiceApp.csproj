@@ -7,4 +7,7 @@
   <ItemGroup>
     <ProjectReference Include="../Voip.Telephony/Voip.Telephony.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.14" />
+  </ItemGroup>
 </Project>
