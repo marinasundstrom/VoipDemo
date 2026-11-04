@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 public sealed class AsteriskMediaSession : IAsyncDisposable, ICallMedia
 {

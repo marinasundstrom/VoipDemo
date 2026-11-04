@@ -1,13 +1,13 @@
 using System.Diagnostics;
 
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 public sealed class MacSpeechSynthesizer(IConfiguration configuration) : ISpeechSynthesizer
 {
     public async Task<byte[]> SynthesizeAsync(string text, CancellationToken cancellationToken = default)
     {
         if (!OperatingSystem.IsMacOS())
-            throw new PlatformNotSupportedException("Live speech uses macOS say. Run VoiceApp locally or configure the Echo scenario in Docker.");
+            throw new PlatformNotSupportedException("Live speech uses macOS say. Run the application locally on macOS or register another ISpeechSynthesizer.");
         if (string.IsNullOrWhiteSpace(text) || text.Length > 4000)
             throw new ArgumentException("Speech text must contain 1–4000 characters.", nameof(text));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

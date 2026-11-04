@@ -1,4 +1,4 @@
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 public sealed class CallSession : IAsyncDisposable
 {

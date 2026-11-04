@@ -4,6 +4,17 @@ A VoIP proof of concept using Asterisk, ASP.NET Core, and a SIP softphone such a
 
 VoiceApp can run **locally on macOS** while Asterisk runs in Docker, or both can run in Docker. The local development profile runs an interactive menu with speech synthesized during the call using macOS `say` and FFmpeg. Docker defaults to the original Echo scenario using a prepared PCM announcement (or a test tone).
 
+## Two apps, one foundation
+
+| App | Purpose | Dial |
+| --- | --- | --- |
+| [VoiceApp](src/VoiceApp) | Media playground: recorded audio, live speech, DTMF, record/playback | **500** |
+| [CustomerServiceApp](src/CustomerServiceApp/README.md) | Customer-service template: opening hours, topic selection, queue/music, automatic or agent-accepted calls | **600** |
+
+Both hosts use [Voip.Telephony](src/Voip.Telephony/README.md), which provides the ARI connection, call lifecycle, WebSocket audio, DTMF, and speech interfaces. Each app owns its use-case-specific flow. Customer-service policies stay in its own project; they do not expand VoiceApp or the shared transport layer. The foundation README explains how to build a third sample.
+
+The commands below concern VoiceApp. See the customer-service README for its independent host, queue/operator APIs, and opening-hour controls. Both can run concurrently with distinct ARI application names.
+
 ## How it works
 
 ```text

@@ -1,6 +1,6 @@
 using System.Threading.Channels;
 
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 public sealed class CallInput
 {

@@ -16,7 +16,9 @@ services:
       - voip
 
   voiceapp:
-    build: ./src/VoiceApp
+    build:
+      context: .
+      dockerfile: src/VoiceApp/Dockerfile
     environment:
       Asterisk__BaseUrl: http://asterisk:8088/ari/
       Asterisk__Username: voiceapp

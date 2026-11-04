@@ -1,4 +1,4 @@
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 // Return raw 16 kHz, mono, signed 16-bit little-endian PCM.
 // A future AI/TTS provider can implement this without changing call control.

@@ -1,3 +1,4 @@
+using Voip.Telephony;
 using System.Buffers.Binary;
 
 namespace VoiceApp.Services;
@@ -5,7 +6,7 @@ namespace VoiceApp.Services;
 public sealed class DemoCallFlow(
     IConfiguration configuration,
     ISpeechSynthesizer speech,
-    ILogger<DemoCallFlow> logger)
+    ILogger<DemoCallFlow> logger) : ICallFlow
 {
     public async Task RunAsync(ICallMedia media, CallInput input, CancellationToken token)
     {

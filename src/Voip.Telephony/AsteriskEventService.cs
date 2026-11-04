@@ -3,15 +3,16 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading.Channels;
 
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
 public sealed class AsteriskEventService(
     IConfiguration configuration,
     AsteriskClient asterisk,
-    DemoCallFlow flow,
+    ICallFlow flow,
     ILogger<AsteriskEventService> logger) : BackgroundService
 {
-    private const string MediaChannelPrefix = "voiceapp-media-";
+    private string Application => configuration["Asterisk:Application"] ?? "voiceapp";
+    private string MediaChannelPrefix => Application + "-media-";
     private readonly ConcurrentDictionary<string, CallSession> sessions = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -41,7 +42,7 @@ public sealed class AsteriskEventService(
             ?? throw new InvalidOperationException("Missing Asterisk:Username");
         var password = configuration["Asterisk:Password"]
             ?? throw new InvalidOperationException("Missing Asterisk:Password");
-        uri.Query = "app=voiceapp&api_key=" + Uri.EscapeDataString($"{username}:{password}");
+        uri.Query = $"app={Uri.EscapeDataString(Application)}&api_key=" + Uri.EscapeDataString($"{username}:{password}");
         using var socket = new ClientWebSocket();
         logger.LogInformation("Connecting to Asterisk ARI at {Host}:{Port}", uri.Host, uri.Port);
         await socket.ConnectAsync(uri.Uri, cancellationToken);
@@ -125,7 +126,7 @@ public sealed class AsteriskEventService(
             var token = setup.Token;
             await asterisk.AnswerAsync(session.ChannelId, token);
             // Assign IDs before REST requests so even a lost response can be cleaned up.
-            session.BridgeId = "voiceapp-bridge-" + session.Id;
+            session.BridgeId = Application + "-bridge-" + session.Id;
             await asterisk.CreateBridgeAsync(session.BridgeId, token);
             await asterisk.AddChannelToBridgeAsync(session.BridgeId, session.ChannelId, token);
             session.MediaChannelId = MediaChannelPrefix + session.Id;

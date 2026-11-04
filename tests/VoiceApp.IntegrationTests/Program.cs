@@ -1,3 +1,4 @@
+using Voip.Telephony;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -93,6 +94,7 @@ static async Task RunAsync(string scenario)
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
     var ct = deadline.Token;
+    var application = scenario == "speech" ? "customerservice" : "voiceapp";
     var events = Channel.CreateUnbounded<string>();
     var requests = new ConcurrentQueue<string>();
     var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -112,6 +114,7 @@ static async Task RunAsync(string scenario)
 
     server.Map("/ari/events", async context =>
     {
+        Check(context.Request.Query["app"] == application, "Wrong ARI application subscription");
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
         connected.TrySetResult();
         try
@@ -143,6 +146,7 @@ static async Task RunAsync(string scenario)
     server.MapPost("/ari/channels/externalMedia", async (HttpContext context) =>
     {
         var q = context.Request.Query;
+        Check(q["app"] == application, "External media used the wrong ARI app");
         Check(q["transport"] == "websocket" && q["encapsulation"] == "none" &&
               q["format"] == "slin16" && q["external_host"] == "INCOMING" &&
               q["connection_type"] == "server", "Incorrect external media parameters");
@@ -259,6 +263,7 @@ static async Task RunAsync(string scenario)
     var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {
         ["Asterisk:BaseUrl"] = baseUrl,
+        ["Asterisk:Application"] = application,
         ["Asterisk:Username"] = "test",
         ["Asterisk:Password"] = "test",
         ["Asterisk:AudioFile"] = sourceAudio is null ? null : audioPath,
@@ -278,7 +283,7 @@ static async Task RunAsync(string scenario)
                 type = "ChannelDtmfReceived", channel = new { id = "caller" }, digit = digit.ToString()
             }));
     });
-    using var service = new AsteriskEventService(configuration, new AsteriskClient(http),
+    using var service = new AsteriskEventService(configuration, new AsteriskClient(http, configuration),
         new DemoCallFlow(configuration, synthesizer, NullLogger<DemoCallFlow>.Instance),
         NullLogger<AsteriskEventService>.Instance);
     try

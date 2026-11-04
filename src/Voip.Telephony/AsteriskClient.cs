@@ -1,9 +1,9 @@
 using System.Net;
 using System.Text.Json;
 
-namespace VoiceApp.Services;
+namespace Voip.Telephony;
 
-public sealed class AsteriskClient(HttpClient http)
+public sealed class AsteriskClient(HttpClient http, IConfiguration? configuration = null)
 {
     public async Task AnswerAsync(
         string channelId,
@@ -132,7 +132,7 @@ public sealed class AsteriskClient(HttpClient http)
     {
         var query = new Dictionary<string, string>
         {
-            ["app"] = "voiceapp",
+            ["app"] = configuration?["Asterisk:Application"] ?? "voiceapp",
             ["channelId"] = channelId,
             ["external_host"] = "INCOMING",
             ["transport"] = "websocket",
@@ -193,5 +193,52 @@ public sealed class AsteriskClient(HttpClient http)
             $"bridges/{Uri.EscapeDataString(bridgeId)}", cancellationToken);
         if (response.StatusCode != HttpStatusCode.NotFound)
             response.EnsureSuccessStatusCode();
+    }
+
+    public async Task StartMusicOnHoldAsync(
+    string channelId,
+    CancellationToken cancellationToken = default)
+    {
+        using var response = await http.PostAsync(
+            $"channels/{Uri.EscapeDataString(channelId)}/moh",
+            null,
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task StopMusicOnHoldAsync(
+        string channelId,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await http.DeleteAsync(
+            $"channels/{Uri.EscapeDataString(channelId)}/moh",
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<string> OriginateAsync(
+    string endpoint,
+    string callId,
+    CancellationToken cancellationToken = default)
+    {
+        var channelId = Guid.NewGuid().ToString("N");
+
+        var url =
+            $"channels/{Uri.EscapeDataString(channelId)}" +
+            $"?endpoint={Uri.EscapeDataString(endpoint)}" +
+            $"&app={Uri.EscapeDataString(configuration?["Asterisk:Application"] ?? "voiceapp")}" +
+            $"&appArgs={Uri.EscapeDataString($"agent,{callId}")}" +
+            "&timeout=30";
+
+        using var response = await http.PostAsync(
+            url,
+            null,
+            cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        return channelId;
     }
 }
